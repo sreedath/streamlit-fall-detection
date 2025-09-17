@@ -3,6 +3,7 @@ import requests
 import streamlit as st
 import tempfile
 import numpy as np
+import os
 
 # =========================
 # CONFIGURATION
@@ -16,6 +17,10 @@ INFERENCE_URL = f"https://detect.roboflow.com/{PROJECT_ID}/{MODEL_VERSION}?api_k
 # FUNCTION TO RUN INFERENCE
 # =========================
 def infer_frame(frame, conf_threshold):
+    """
+    Encodes the frame as JPG, sends it to Roboflow API,
+    and returns predictions above a confidence threshold.
+    """
     _, img_encoded = cv2.imencode('.jpg', frame)
     response = requests.post(
         INFERENCE_URL,
@@ -28,14 +33,19 @@ def infer_frame(frame, conf_threshold):
             return [p for p in preds["predictions"] if p["confidence"] >= conf_threshold]
     return []
 
+
 def annotate_frame(frame, predictions):
+    """
+    Draw bounding boxes and labels on the frame
+    (with fall/stand label flipping as per your requirement).
+    """
     for pred in predictions:
         x, y = int(pred["x"]), int(pred["y"])
         w, h = int(pred["width"]), int(pred["height"])
         class_name = pred["class"].lower()
         conf = pred["confidence"]
 
-        # Flip the labels as per your requirement
+        # Flip the labels as required
         if class_name == "fall":
             label, color = "stand", (0, 255, 0)
         elif class_name == "stand":
@@ -48,23 +58,44 @@ def annotate_frame(frame, predictions):
                     cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
     return frame
 
+
 # =========================
 # STREAMLIT APP
 # =========================
 st.title("Fall Detection Demo (Roboflow + Streamlit)")
 
+# DIFFERENCE: In Streamlit, we use interactive widgets (like sliders)
+# instead of hardcoding values in code.
 conf_threshold = st.slider("Confidence Threshold", 0.0, 1.0, 0.2, 0.05)
 
+# DIFFERENCE: Instead of running automatically on one input,
+# we let the user choose between uploading a video or using webcam.
 option = st.radio("Choose input source:", ["Upload Video", "Webcam"])
 
+# -------------------------
+# CASE 1: UPLOAD VIDEO
+# -------------------------
 if option == "Upload Video":
     uploaded_file = st.file_uploader("Upload a video", type=["mp4", "mov", "avi"])
 
     if uploaded_file is not None:
+        # DIFFERENCE: In Streamlit we must save the uploaded file
+        # to a temporary file before OpenCV can read it.
         tfile = tempfile.NamedTemporaryFile(delete=False)  
         tfile.write(uploaded_file.read())
         cap = cv2.VideoCapture(tfile.name)
 
+        # DIFFERENCE: We also prepare an output temp file
+        # so that we can later provide it for downloading.
+        out_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        out = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
+
+        # DIFFERENCE: Instead of cv2.imshow (not allowed in Streamlit),
+        # we use st.empty() which acts as a "placeholder" for updating frames.
         stframe = st.empty()
 
         while True:
@@ -75,19 +106,43 @@ if option == "Upload Video":
             predictions = infer_frame(frame, conf_threshold)
             annotated_frame = annotate_frame(frame, predictions)
 
+            # Save frame to output video
+            out.write(annotated_frame)
+
+            # Show frame live inside Streamlit browser
             stframe.image(cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB), channels="RGB")
 
         cap.release()
+        out.release()
 
+        # DIFFERENCE: In OpenCV, you would save the file and print the path.
+        # In Streamlit, we can directly offer a "Download" button in the UI.
+        with open(out_path, "rb") as f:
+            st.download_button(
+                "Download Annotated Video",
+                f,
+                file_name="annotated_output.mp4",
+                mime="video/mp4"
+            )
+
+# -------------------------
+# CASE 2: WEBCAM
+# -------------------------
 elif option == "Webcam":
     st.write("Click 'Start' to capture from webcam")
+
+    # DIFFERENCE: In Streamlit, we cannot directly use cv2.VideoCapture(0)
+    # because Streamlit runs in a web browser. Instead, we use st.camera_input,
+    # which lets the user capture an image or short video clip from webcam.
     camera_input = st.camera_input("Take a picture or record short video")
 
     if camera_input is not None:
+        # Convert the uploaded webcam capture into a NumPy array
         file_bytes = np.asarray(bytearray(camera_input.read()), dtype=np.uint8)
         frame = cv2.imdecode(file_bytes, 1)
 
         predictions = infer_frame(frame, conf_threshold)
         annotated_frame = annotate_frame(frame, predictions)
 
+        # Show annotated frame in browser
         st.image(cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB), channels="RGB")
